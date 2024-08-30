@@ -1,14 +1,31 @@
+mod backend;
 mod cli;
+
+use backend::DataFusionBackend;
+use cli::*;
+use crossbeam_channel as mpsc;
+use enum_dispatch::enum_dispatch;
+use reedline_repl_rs::CallBackMap;
 use std::{ops::Deref, thread};
+use tokio::runtime::Runtime;
 
 pub use cli::ReplCommand;
-use crossbeam_channel as mpsc;
-use reedline_repl_rs::CallBackMap;
+
+#[enum_dispatch]
+trait CmdExecutor {
+    async fn execute<T: Backend>(self, backend: &mut T) -> anyhow::Result<String>;
+}
+
 pub struct ReplContext {
-    pub tx: mpsc::Sender<ReplCommand>,
+    pub tx: mpsc::Sender<ReplMsg>,
 }
 
 pub type ReplCallBacks = CallBackMap<ReplContext, reedline_repl_rs::Error>;
+
+pub struct ReplMsg {
+    cmd: ReplCommand,
+    tx: oneshot::Sender<String>,
+}
 
 pub fn get_callbacks() -> ReplCallBacks {
     let mut callbacks = ReplCallBacks::new();
@@ -17,12 +34,27 @@ pub fn get_callbacks() -> ReplCallBacks {
     callbacks.insert("describe".to_string(), cli::describe);
     callbacks.insert("head".to_string(), cli::head);
     callbacks.insert("sql".to_string(), cli::sql);
+    callbacks.insert("schema".to_string(), cli::schema);
 
     callbacks
 }
 
+trait Backend {
+    type DataFrame: ReplDisplay;
+    async fn connect(&mut self, opts: &ConnectOpts) -> anyhow::Result<()>;
+    async fn list(&self) -> anyhow::Result<Self::DataFrame>;
+    async fn schema(&self, name: &str) -> anyhow::Result<Self::DataFrame>;
+    async fn describe(&self, name: &str) -> anyhow::Result<Self::DataFrame>;
+    async fn head(&self, name: &str, size: usize) -> anyhow::Result<Self::DataFrame>;
+    async fn sql(&self, sql: &str) -> anyhow::Result<Self::DataFrame>;
+}
+
+trait ReplDisplay {
+    async fn display(self) -> anyhow::Result<String>;
+}
+
 impl Deref for ReplContext {
-    type Target = mpsc::Sender<ReplCommand>;
+    type Target = mpsc::Sender<ReplMsg>;
 
     fn deref(&self) -> &Self::Target {
         &self.tx
@@ -37,15 +69,50 @@ impl Default for ReplContext {
 
 impl ReplContext {
     pub fn new() -> Self {
-        let (tx, rx) = mpsc::unbounded();
+        let (tx, rx) = mpsc::unbounded::<ReplMsg>();
+        let rt = Runtime::new().expect("Failed to create runtime");
+        let mut backend = DataFusionBackend::new();
+
         thread::Builder::new()
             .name("ReplBackend".to_string())
             .spawn(move || {
-                while let Ok(cmd) = rx.recv() {
-                    println!("!!! cmd:{:?}", cmd);
+                while let Ok(msg) = rx.recv() {
+                    if let Err(e) = rt.block_on(async {
+                        let ret = msg.cmd.execute(&mut backend).await?;
+                        msg.tx.send(ret)?;
+                        Ok::<_, anyhow::Error>(())
+                    }) {
+                        eprintln!("Failed to process command: {}", e)
+                    }
                 }
             })
             .unwrap();
         Self { tx }
+    }
+    pub fn send(&self, msg: ReplMsg, rx: oneshot::Receiver<String>) -> Option<String> {
+        if let Err(e) = self.tx.send(msg) {
+            eprint!("Repl Send Error:{}", e);
+            std::process::exit(1);
+        }
+        match rx.recv() {
+            Ok(data) => Some(data),
+            Err(e) => {
+                eprintln!("Repl Recv Error:{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+impl ReplMsg {
+    pub fn new(cmd: impl Into<ReplCommand>) -> (Self, oneshot::Receiver<String>) {
+        let (tx, rx) = oneshot::channel();
+        (
+            Self {
+                cmd: cmd.into(),
+                tx,
+            },
+            rx,
+        )
     }
 }

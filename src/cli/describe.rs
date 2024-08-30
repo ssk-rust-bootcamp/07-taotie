@@ -1,8 +1,8 @@
 use clap::{ArgMatches, Parser};
 
-use crate::ReplContext;
+use crate::{Backend, CmdExecutor, ReplContext, ReplDisplay, ReplMsg};
 
-use super::{ReplCommand, ReplResult};
+use super::ReplResult;
 
 #[derive(Debug, Parser)]
 pub struct DescribeOpts {
@@ -14,19 +14,18 @@ pub fn describe(args: ArgMatches, ctx: &mut ReplContext) -> ReplResult {
         .get_one::<String>("name")
         .expect("expect name")
         .to_string();
-    let cmd = DescribeOpts::new(name).into();
-    let _ = ctx.send(cmd);
-    Ok(None)
-}
-
-impl From<DescribeOpts> for ReplCommand {
-    fn from(value: DescribeOpts) -> Self {
-        ReplCommand::Describe(value)
-    }
+    let (msg, rx) = ReplMsg::new(DescribeOpts::new(name));
+    Ok(ctx.send(msg, rx))
 }
 
 impl DescribeOpts {
     pub fn new(name: String) -> Self {
         Self { name }
+    }
+}
+impl CmdExecutor for DescribeOpts {
+    async fn execute<T: Backend>(self, backend: &mut T) -> anyhow::Result<String> {
+        let df = backend.describe(&self.name).await?;
+        df.display().await
     }
 }
