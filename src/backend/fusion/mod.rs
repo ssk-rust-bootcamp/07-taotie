@@ -1,9 +1,23 @@
+mod describe;
+mod df_describe;
+
+use arrow::{array::RecordBatch, util::pretty::pretty_format_batches};
+use datafusion::{
+    dataframe::DataFrame,
+    execution::{
+        config::SessionConfig,
+        context::SessionContext,
+        options::{CsvReadOptions, NdJsonReadOptions},
+    },
+};
 use std::ops::Deref;
 
-use arrow::util::pretty::pretty_format_batches;
-use datafusion::{execution::context::SessionContext, prelude::SessionConfig};
+use crate::{
+    cli::{ConnectOpts, DatasetConn},
+    Backend, ReplDisplay,
+};
 
-use crate::{Backend, ConnectOpts, DatasetConn, ReplDisplay};
+use self::describe::DataFrameDescriber;
 
 pub struct DataFusionBackend(SessionContext);
 
@@ -15,47 +29,58 @@ impl DataFusionBackend {
         Self(ctx)
     }
 }
+
 impl Backend for DataFusionBackend {
-    type DataFrame = datafusion::dataframe::DataFrame;
     async fn connect(&mut self, opts: &ConnectOpts) -> anyhow::Result<()> {
         match &opts.conn {
             DatasetConn::Postgres(_conn_str) => {
                 println!("Postgres connection is not supported yet")
             }
-            DatasetConn::Csv(filename) => {
-                self.register_csv(&opts.name, filename, Default::default())
+            DatasetConn::Csv(file_opts) => {
+                let csv_opts = CsvReadOptions {
+                    file_extension: &file_opts.ext,
+                    file_compression_type: file_opts.compression,
+                    ..Default::default()
+                };
+
+                self.register_csv(&opts.name, &file_opts.filename, csv_opts)
                     .await?;
             }
             DatasetConn::Parquet(filename) => {
                 self.register_parquet(&opts.name, filename, Default::default())
                     .await?;
             }
-            DatasetConn::NdJson(filename) => {
-                self.register_json(&opts.name, filename, Default::default())
+            DatasetConn::NdJson(file_opts) => {
+                let json_opts = NdJsonReadOptions {
+                    file_extension: &file_opts.ext,
+                    file_compression_type: file_opts.compression,
+                    ..Default::default()
+                };
+                self.register_json(&opts.name, &file_opts.filename, json_opts)
                     .await?;
             }
         }
         Ok(())
     }
 
-    async fn list(&self) -> anyhow::Result<Self::DataFrame> {
+    async fn list(&self) -> anyhow::Result<impl ReplDisplay> {
         let sql = "select table_name, table_type from information_schema.tables where table_schema = 'public'";
         let df = self.0.sql(sql).await?;
         Ok(df)
     }
 
-    async fn schema(&self, name: &str) -> anyhow::Result<Self::DataFrame> {
+    async fn schema(&self, name: &str) -> anyhow::Result<impl ReplDisplay> {
         let df = self.0.sql(&format!("DESCRIBE {}", name)).await?;
         Ok(df)
     }
 
-    async fn describe(&self, name: &str) -> anyhow::Result<Self::DataFrame> {
+    async fn describe(&self, name: &str) -> anyhow::Result<impl ReplDisplay> {
         let df = self.0.sql(&format!("select * from {}", name)).await?;
-        let df = df.describe().await?;
-        Ok(df)
+        let ddf = DataFrameDescriber::try_new(df)?;
+        ddf.describe().await
     }
 
-    async fn head(&self, name: &str, size: usize) -> anyhow::Result<Self::DataFrame> {
+    async fn head(&self, name: &str, size: usize) -> anyhow::Result<impl ReplDisplay> {
         let df = self
             .0
             .sql(&format!("SELECT * FROM {} LIMIT {}", name, size))
@@ -63,7 +88,7 @@ impl Backend for DataFusionBackend {
         Ok(df)
     }
 
-    async fn sql(&self, sql: &str) -> anyhow::Result<Self::DataFrame> {
+    async fn sql(&self, sql: &str) -> anyhow::Result<impl ReplDisplay> {
         let df = self.0.sql(sql).await?;
         Ok(df)
     }
@@ -83,10 +108,17 @@ impl Deref for DataFusionBackend {
     }
 }
 
-impl ReplDisplay for datafusion::dataframe::DataFrame {
+impl ReplDisplay for DataFrame {
     async fn display(self) -> anyhow::Result<String> {
         let batches = self.collect().await?;
         let data = pretty_format_batches(&batches)?;
+        Ok(data.to_string())
+    }
+}
+
+impl ReplDisplay for RecordBatch {
+    async fn display(self) -> anyhow::Result<String> {
+        let data = pretty_format_batches(&[self])?;
         Ok(data.to_string())
     }
 }

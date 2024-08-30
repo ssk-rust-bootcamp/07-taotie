@@ -40,13 +40,12 @@ pub fn get_callbacks() -> ReplCallBacks {
 }
 
 trait Backend {
-    type DataFrame: ReplDisplay;
     async fn connect(&mut self, opts: &ConnectOpts) -> anyhow::Result<()>;
-    async fn list(&self) -> anyhow::Result<Self::DataFrame>;
-    async fn schema(&self, name: &str) -> anyhow::Result<Self::DataFrame>;
-    async fn describe(&self, name: &str) -> anyhow::Result<Self::DataFrame>;
-    async fn head(&self, name: &str, size: usize) -> anyhow::Result<Self::DataFrame>;
-    async fn sql(&self, sql: &str) -> anyhow::Result<Self::DataFrame>;
+    async fn list(&self) -> anyhow::Result<impl ReplDisplay>;
+    async fn schema(&self, name: &str) -> anyhow::Result<impl ReplDisplay>;
+    async fn describe(&self, name: &str) -> anyhow::Result<impl ReplDisplay>;
+    async fn head(&self, name: &str, size: usize) -> anyhow::Result<impl ReplDisplay>;
+    async fn sql(&self, sql: &str) -> anyhow::Result<impl ReplDisplay>;
 }
 
 trait ReplDisplay {
